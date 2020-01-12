@@ -363,7 +363,304 @@ classdef n_objectracker
                     states(i) = state;
                 end
             end
-        end     
+        end
+        
+        function estimates = TOMHT(obj, states, Z, sensormodel, motionmodel, measmodel)
+            %TOMHT tracks n object using track-oriented multi-hypothesis tracking
+            %INPUT: obj: an instantiation of n_objectracker class
+            %       states: structure array of size (1, number of objects)
+            %       with two fields: 
+            %                x: object initial state mean --- (object state
+            %                dimension) x 1 vector 
+            %                P: object initial state covariance --- (object
+            %                state dimension) x (object state dimension)
+            %                matrix  
+            %       Z: cell array of size (total tracking time, 1), each
+            %       cell stores measurements of size (measurement
+            %       dimension) x (number of measurements at corresponding
+            %       time step)  
+            %OUTPUT:estimates: cell array of size (total tracking time, 1),
+            %       each cell stores estimated object state of size (object
+            %       state dimension) x (number of objects)
+            
+            % Task description
+            %
+            % for each local hypothesis in each hypothesis tree: 
+            % 1). implement ellipsoidal gating; 
+            % 2). calculate missed detection and predicted likelihood for
+            %     each measurement inside the gate and make sure to save
+            %     these for future use; 
+            % 3). create updated local hypotheses and make sure to save how
+            %     these connects to the old hypotheses and to the new the 
+            %     measurements for future use;
+            %
+            % for each predicted global hypothesis: 
+            % 1). create 2D cost matrix; 
+            % 2). obtain M best assignments using a provided M-best 2D 
+            %     assignment solver; 
+            % 3). update global hypothesis look-up table according to 
+            %     the M best assignment matrices obtained and use your new 
+            %     local hypotheses indexing;
+            %
+            % normalise global hypothesis weights and implement hypothesis
+            % reduction technique: pruning and capping;
+            %
+            % prune local hypotheses that are not included in any of the
+            % global hypotheses;
+            %
+            % Re-index global hypothesis look-up table;
+            %
+            % extract object state estimates from the global hypothesis
+            % with the highest weight;
+            %
+            % predict each local hypothesis in each hypothesis tree.
+            %
+            %
+            
+            % number of states (objects)
+            n_states = numel(states);
+            estimates = cell(numel(Z),1);
+            l_0_log = log(1 - sensormodel.P_D);
+            l_clut_log = log(sensormodel.P_D/sensormodel.intensity_c);
+            
+            % number of hypotheses
+            M = obj.reduction.M;
+            
+            % create initial hypotheses trees
+            local_h_trees = cell(1,n_states);
+            new_local_h_trees = cell(1,n_states);
+            
+            for i=1:n_states
+                local_h_trees{i} = states(i);
+            end
+            
+            % initial log weights for each state
+            w_log_states = cell(1, n_states)
+            
+            % initialize the global hypotheses lookup table
+            % with one hypothesis (local hypothesis) for each state.
+            % For each object there is only one local hypothesis in the 
+            % beginning. Thus index 1.
+            %
+            % rows are global hypotheses
+            % columns are states
+            global_H = ones(1, n_states);
+            
+            % there is only one hypothesis, so the hypotheses 
+            % weight is only 1
+            w_log_h = log(1);
+            
+            % for all time steps
+            for k=1:numel(Z)
+                z = Z{k};
+                
+                % number of measurements
+                mk = size(z, 2);
+
+                % there is a gating for for each state / hypothesis tree
+                % each cell contains a matrix
+                %    measurements x local hypothesis (each column is a
+                %    leaf)
+                %       
+                z_masks = cell(1, n_states);
+
+                % for each local hypothesis tree (object)
+                for i=1:n_states
+                    % number of leafs / number of local hypotheses
+                    n_lh = length(local_h_trees{i});                    
+
+                    % get leafs (local hypotheses)
+                    lhs = local_h_trees{i};
+                                        
+                    % for each leaf (local hypothesis) do gating
+                    z_masks{i} = zeros(mk,n_lh);
+                    
+                    for i_lh = 1:n_lh
+                        % gating
+                        [~, z_masks{i}(:,i_lh)] = obj.density.ellipsoidalGating(...
+                            lhs(i_lh), z, measmodel, obj.gating.size);
+                    end
+                end
+                
+                % get rid of all measurements that were 
+                % not associated at all
+                non_associated_z = ...
+                    sum(cell2mat(z_masks)') == 0;
+                z = z(:,~non_associated_z);
+                mk = sum(~non_associated_z);
+                z_masks = cellfun(...
+                    @(z_masks_i) z_masks_i(~non_associated_z,:), ...
+                    z_masks, 'UniformOutput' ,false);
+
+                % calculate missed detection and predicted likelihood for
+                % each measurement inside the gate and save
+                % these for future use; 
+
+                % for each local hypothesis tree (object)
+                for i=1:n_states
+                    % number of leafs / number of local hypotheses
+                    n_lh = length(local_h_trees{i});                    
+
+                    % initialize log weights with infinity
+                    w_log_states{i} = -inf(1, n_lh * (mk + 1));
+
+                    % get leafs (local hypotheses)
+                    lhs = local_h_trees{i};
+                                        
+                    for lh_i = 1:n_lh
+                        lh = lhs(lh_i);
+                        
+                        % calculate missed detection and predicted
+                        % likelihood
+                        S = obj.computeInnovationCovariance(lh, measmodel);                        
+                        z_bar = measmodel.h(lh.x);
+                        
+                        for j = find(z_masks{i}(:, lh_i))'
+                            % new local hypothesis index
+                            new_lh_i = (lh_i - 1) * (mk + 1) + j;
+                            
+                            w_log_states{i}(new_lh_i) = l_clut_log -...
+                                1/2 * log(det( 2 * pi * S)) - ...
+                                1/2 * (z(:, j) - z_bar).' / S * (z(:, j) - z_bar);
+                            
+                            % create updated local hypotheses
+                            new_local_h_trees{i}(new_lh_i) = obj.density.update(...
+                                lh, z(:,j) , measmodel);                            
+                        end
+                        
+                        misdetect_lh_i = lh_i * (mk + 1);
+                        
+                        % calculate missed detection likelihood
+                        w_log_states{i}(misdetect_lh_i) = l_0_log;
+                        
+                        % create updated misdetection local hypotheses
+                        new_local_h_trees{i}(misdetect_lh_i) = lhs(lh_i);
+                    end
+                end
+                
+                % for each predicted global hypothesis: 
+                % (old hypothesis trees)
+                new_global_H = [];
+                new_w_log_h = [];
+                
+                for H_i = 1:size(global_H, 1);
+                    % 1). create 2D cost matrix; 
+                    % 
+                    % number of states rows, number of measurements + number
+                    % of misdetection columns
+                    L = inf(n_states, mk + n_states);
+
+                    for i=1:n_states
+                        local_h_i = global_H(H_i, i);
+                        first_i = (local_h_i - 1) * (mk + 1) + 1;
+                        last_i  =  local_h_i      * (mk + 1) - 1;
+                        L(i, 1:mk) = -w_log_states{i}(first_i:last_i);
+                        
+                        % misdetection hypthesis
+                        L(i, mk + i) = -w_log_states{i}(last_i + 1);
+                    end
+
+                    % 2). obtain M best assignments using a provided  
+                    %     M-best 2D assignment solver; 
+                    
+                    % col4rowBest: A numRowXk vector where the entry in each 
+                    %    element is an assignment of the element in that row 
+                    %    to a column. 0 entries signify unassigned rows.
+                    %    The columns of this matrix are the hypotheses.
+                    [col4rowBest,~,gainBest] = kBest2DAssign(L, M);
+                    assert(all(gainBest ~= -1), ...
+                        'Assignment problem is not possible to solve');
+
+                    % there might be not as many hypotheses available
+                    M_left = length(gainBest);
+
+                    % compute the weight for each remaining hypotheses
+                    % The weight is exp(-tr(A' * L) but we are intereseted in
+                    % log weights. 
+                    M_i = 1:M_left; % hypotheses indexes
+                    trace_AL_h = @(h) sum(...
+                        L(...
+                            sub2ind(size(L), 1:n_states, col4rowBest(:,h)')));
+                    new_w_log_h_i = arrayfun(trace_AL_h, M_i) * -1;
+                    new_w_log_h_i = new_w_log_h_i + w_log_h(H_i);
+                    new_w_log_h = [new_w_log_h;new_w_log_h_i'];
+
+                    % set the misdetection hypotheses to the last index
+                    % as they are all the same and can be represended with 
+                    % one value.                    
+                    col4rowBest( col4rowBest > mk ) = mk+1;
+                    
+                    % 3). update global hypothesis look-up table according 
+                    %     to the M best assignment matrices obtained and 
+                    %     use your new local hypotheses indexing;
+                    for M_i=1:M_left
+                        % we use the prior look-up-table, the prior
+                        % hypothesis and the data association to figure out
+                        % which posterior local hypothesis is included in
+                        % the look-up-table
+                        new_global_H(end + 1, :) = ...
+                            arrayfun(...
+                                @(i) (global_H(H_i, i) - 1) * (mk + 1) + col4rowBest(i, M_i), ...
+                                1:n_states);
+                    end
+                end
+
+                %normalize log weights
+                new_w_log_h = normalizeLogWeights(new_w_log_h);
+
+                % prune assignment matrices that correspond to data 
+                % association hypotheses with low weights and renormalise 
+                % the weights
+                [new_w_log_h, hyp_left] = hypothesisReduction.prune(...
+                    new_w_log_h, 1:length(new_w_log_h), obj.reduction.w_min );
+                new_global_H = new_global_H(hyp_left, :);
+
+                %normalize log weights
+                new_w_log_h = normalizeLogWeights(new_w_log_h);
+                
+                % capping
+                [new_w_log_h, hyp_left] = hypothesisReduction.cap(...
+                    new_w_log_h, 1:length(new_w_log_h), obj.reduction.M );
+                new_global_H = new_global_H(hyp_left, :);
+                
+                %normalize log weights
+                new_w_log_h = normalizeLogWeights(new_w_log_h);
+                    
+                for i=1:n_states                    
+                    % prune local hypotheses that are not included in any
+                    % of the global hypotheses;
+                    hyp_keep = unique(new_global_H(:, i));
+                    new_local_h_trees{i} = new_local_h_trees{i}(hyp_keep);
+                    
+                    % Re-index global hypothesis look-up table;
+                    for new_index_i=1:numel(hyp_keep)
+                        new_global_H( ...
+                            new_global_H(:,i) == hyp_keep(new_index_i), i)... 
+                            = new_index_i;
+                    end
+                end
+
+                
+                [~,best_w_log_h_idx] = max(new_w_log_h);
+                
+                for i=1:n_states
+                    % extract object state estimates from the global hypothesis
+                    % with the highest weight;
+                    estimates{k}(:,i)   = new_local_h_trees{i}( ...
+                        new_global_H(best_w_log_h_idx, i)).x;
+                    
+                    % predict each local hypothesis in each hypothesis 
+                    % tree.
+                    new_local_h_trees{i} = arrayfun(...
+                        @(lh) obj.density.predict(lh, motionmodel), ...
+                        new_local_h_trees{i});
+                end
+                
+                local_h_trees = new_local_h_trees;
+                w_log_h = new_w_log_h;
+                global_H = new_global_H;
+            end    
+        end
     end
 end
 
