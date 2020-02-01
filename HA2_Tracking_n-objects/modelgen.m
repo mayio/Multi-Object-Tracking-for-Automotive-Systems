@@ -20,18 +20,15 @@ classdef modelgen
             % Volume
             V = prod(diff(range_c'));
             
-            % rate
-            lambda_bar_c = lambda_c * V;
-            
-            % spatial pdf
-            obj.pdf_c = lambda_c / lambda_bar_c;
+            %spatial pdf
+            obj.pdf_c = 1 / V;
             
             % lambda: expected number of clutter detections per unit volume
             obj.intensity_c = lambda_c / V;
             
-            obj.P_D      = P_D;
+            obj.P_D = P_D;
             obj.lambda_c = lambda_c;
-            obj.range_c  = range_c;
+            obj.range_c = range_c;
         end
         
         function obj = groundtruth(nbirths,xstart,tbirth,tdeath,K)
