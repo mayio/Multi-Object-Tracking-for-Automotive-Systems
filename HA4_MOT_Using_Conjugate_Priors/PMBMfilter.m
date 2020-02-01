@@ -135,6 +135,19 @@ classdef PMBMfilter
             %OUTPUT:lik_detected: predicted likelihood --- (number of
             %measurements x 1) array in logarithmic scale 
             
+            % i-th hypothesis tree, j-th local hypothesis
+            i = tt_entry(1);
+            j = tt_entry(2);
+
+            % local hypotheses
+            lhs = obj.paras.MBM.tt{i, 1};
+
+            % local hypothesis
+            lh = lhs(j);
+
+            % predicted log-likelihood
+            lik_detected = obj.density.predictedLikelihood(...
+                lh.state, z, measmodel) + log(P_D) + log(lh.r);
         end
         
         function Bern = Bern_detected_update_state(obj,tt_entry,z,measmodel)
