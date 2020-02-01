@@ -75,6 +75,11 @@ classdef PMBMfilter
             %                          describing the object pdf
             %       P_S: object survival probability
             
+            % Probability of survival * Probability of existence
+            Bern.r = P_S * Bern.r;
+
+            % Kalman prediction of new state
+            Bern.state = obj.density.predict(Bern.state, motionmodel);
         end
         
         function [Bern, lik_undetected] = Bern_undetected_update(obj,tt_entry,P_D)
