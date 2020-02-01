@@ -97,6 +97,30 @@ classdef PMBMfilter
             %       lik_undetected: missed detection likelihood --- scalar
             %       in logorithmic scale
             
+            % misdetection likelyhood
+            l0 = 1 - P_D;
+
+            % i-th hypothesis tree, j-th local hypothesis
+            i = tt_entry(1);
+            j = tt_entry(2);
+
+            % local hypotheses
+            lhs = obj.paras.MBM.tt{i, 1};
+
+            % local hypothesis
+            lh = lhs(j);
+
+            % the state remains the same
+            Bern = lh;
+
+            % predicted likelihood
+            lik_undetected = (1 - lh.r + lh.r * l0);
+
+            % update probability of existence
+            Bern.r = (lh.r * l0) / lik_undetected;
+
+            % predicted log likelihood
+            lik_undetected = log(lik_undetected);
         end
         
         function lik_detected = Bern_detected_update_lik(obj,tt_entry,z,measmodel,P_D)
