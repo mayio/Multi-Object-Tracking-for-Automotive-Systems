@@ -168,8 +168,21 @@ classdef PMBMfilter
         function obj = PPP_predict(obj,motionmodel,birthmodel,P_S)
             %PPP_PREDICT performs predicion step for PPP components
             %hypothesising undetected objects.
-            %INPUT: P_S: object survival probability --- scalar          
+            %INPUT: P_S: object survival probability --- scalar
 
+            % Predict the undetected objects
+            predict_undetected = @(i) ...
+                obj.density.predict(obj.paras.PPP.states(i), motionmodel);
+
+            obj.paras.PPP.states = arrayfun(...
+                predict_undetected, 1:length(obj.paras.PPP.states));
+            obj.paras.PPP.w = obj.paras.PPP.w + log(P_S);
+
+            % Add birth components
+            obj.paras.PPP.states = ...
+                [obj.paras.PPP.states rmfield(birthmodel, 'w')]';
+            obj.paras.PPP.w = ...
+                [obj.paras.PPP.w; [birthmodel.w]'];
         end
         
         function [Bern, lik_new] = PPP_detected_update(obj,indices,z,measmodel,P_D,clutter_intensity)
