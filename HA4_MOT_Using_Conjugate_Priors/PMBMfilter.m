@@ -207,6 +207,8 @@ classdef PMBMfilter
         function obj = PPP_undetected_update(obj,P_D)
             %PPP_UNDETECTED_UPDATE performs PPP update for missed detection.
             %INPUT: P_D: object detection probability --- scalar
+            obj.paras.PPP.w = ...
+                obj.paras.PPP.w + log(1 - P_D);
             
         end
         
