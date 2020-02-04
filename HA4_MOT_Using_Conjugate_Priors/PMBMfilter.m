@@ -97,7 +97,7 @@ classdef PMBMfilter
             %       lik_undetected: missed detection likelihood --- scalar
             %       in logorithmic scale
             
-            % misdetection likelyhood
+            % misdetection likelihood
             l0 = 1 - P_D;
 
             % i-th hypothesis tree, j-th local hypothesis
@@ -200,8 +200,67 @@ classdef PMBMfilter
             %             state: a struct contains parameters describing
             %             the object pdf
             %       lik_new: predicted likelihood of PPP --- scalar in
-            %       logarithmic scale 
+            %       logarithmic scale
+            
+            % For each mixture component in the PPP intensity, perform 
+            % Kalman update and calculate the predicted likelihood for 
+            % each detection inside the corresponding ellipsoidal gate.
+            clutter_intensity_log = log(clutter_intensity);
+            P_D_log = log(P_D);
+            
+            ppp_states_gated = obj.paras.PPP.states(indices);
+            ppp_states_updated = arrayfun(...
+                @(state) obj.density.update(state, z, measmodel), ...
+                ppp_states_gated);
+            w_log_gated = obj.paras.PPP.w(indices);
+            
+            % compute predicted likelihood
+            
+            n_gated = length(ppp_states_gated);
+            w_tilde_logs = zeros(n_gated, 1);
+            for (i = 1:n_gated)
+                state = ppp_states_gated(i);
+                w_log = w_log_gated(i);
+                Hx = measmodel.H(state.x);
+                mu = measmodel.h(state.x);
+                S = Hx * state.P * Hx' + measmodel.R;
+                %Make sure matrix S is positive definite
+                S = (S+S')/2;
+                w_tilde_logs(i, 1) = w_log + P_D_log + log_mvnpdf(...
+                    z, ...
+                    mu, ...
+                    S);
+            end
+                
+            %l = arrayfun(...
+            %    @(state) log_mvnpdf(...
+            %        z, ...
+            %        measmodel.h(state.x), ...
+            %        measmodel.H(state.x) * state.P * measmodel.H(state.x)' + measmodel.R), ...
+            %    ppp_states_gated);
+           
+            [w_logs, rho] = normalizeLogWeights(w_tilde_logs);
 
+            % The returned likelihood should be the sum of the predicted 
+            % likelihoods calculated for each mixture component in the 
+            % PPP intensity and the clutter intensity. (You can make use 
+            % of the normalizeLogWeights function to achieve this.)
+            [~, lik_new] = normalizeLogWeights([w_tilde_logs; clutter_intensity_log]);
+            
+            % Perform Gaussian moment matching for the updated object 
+            % state densities resulted from being updated by the 
+            % same detection.
+            merged_state = obj.density.momentMatching(w_logs, ppp_states_updated);
+
+            % The returned existence probability of the Bernoulli 
+            % component is the ratio between the sum of the predicted 
+            % likelihoods and the returned likelihood. (Be careful that 
+            % the returned existence probability is in decimal scale while
+            % the likelihoods you calculated beforehand are in logarithmic
+            % scale.)
+            r = exp(rho - lik_new);
+            Bern.r = r;
+            Bern.state = merged_state;
         end
         
         function obj = PPP_undetected_update(obj,P_D)
@@ -306,7 +365,16 @@ classdef PMBMfilter
         
         function obj = PMBM_predict(obj,P_S,motionmodel,birthmodel)
             %PMBM_PREDICT performs PMBM prediction step.
-
+            %Bern_predict
+            nHypTrees = length(obj.paras.MBM.tt);
+            
+            for iHypTree = 1:nHypTrees
+                obj.paras.MBM.tt{iHypTree,1} = arrayfun(...
+                    @(hyp) obj.Bern_predict(hyp, motionmodel,P_S), ...
+                    obj.paras.MBM.tt{iHypTree,1});
+            end
+            
+            obj = obj.PPP_predict(motionmodel,birthmodel,P_S);
         end
         
         function obj = PMBM_update(obj,z,measmodel,sensormodel,gating,w_min,M)
