@@ -162,7 +162,24 @@ classdef PMBMfilter
             %                          scalar; 
             %                          state: a struct contains parameters
             %                          describing the object pdf 
+
+
+            % i-th hypothesis tree, j-th local hypothesis
+            i = tt_entry(1);
+            j = tt_entry(2);
+
+            % local hypotheses
+            lhs = obj.paras.MBM.tt{i, 1};
+
+            % local hypothesis
+            lh = lhs(j);
+
+            % copy the state to use it as template
+            Bern = lh;
             
+            % state update of the Bernoulli
+            Bern.state = obj.density.update(lh.state, z, measmodel);
+            Bern.r = 1;
         end
         
         function obj = PPP_predict(obj,motionmodel,birthmodel,P_S)
