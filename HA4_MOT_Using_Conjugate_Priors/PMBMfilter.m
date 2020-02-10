@@ -435,9 +435,6 @@ classdef PMBMfilter
             % measurement count
             mk = size(z, 2);
             
-            % count of global hypothesis
-            n_tt = length(obj.paras.MBM.tt);
-            
             % Perform ellipsoidal gating for each 
             % mixture component in the PPP intensity.
             [~, ppp_ingate_cells] = arrayfun(...
@@ -447,20 +444,26 @@ classdef PMBMfilter
                 'UniformOutput',false);
             
             ppp_ingate = cell2mat(ppp_ingate_cells');
-            bern_ingate_cells = {};
+            is_ppp_ingate = sum(ppp_ingate, 2) > 0;            
 
             % Perform ellipsoidal gating for each Bernoulli state 
             % density
+
+            % count of global hypothesis
+            n_tt = length(obj.paras.MBM.tt);
+            
+            % measurements that are associated to previous detections
+            z_to_bernoulli = false(mk,1);
+            bern_ingate_cells = cell(n_tt,1);;
             
             % for each hypothesis tree
-            z_to_bernoulli = false(mk,1);
             for i = 1:n_tt
                 % local hypothesis
                 lhs = obj.paras.MBM.tt{i, 1};
                 n_lhs = length(lhs);
                 
                 % for each leaf (local hypothesis) do gating
-                bern_ingate_cells{i} = zeros(mk,n_lhs);
+                bern_ingate_cells{i} = false(mk, n_lhs);
 
                 % each gating cell corresponds to a local hypothesis tree
                 % where each cell contains a matrix of mk rows and n_lhs
@@ -475,11 +478,8 @@ classdef PMBMfilter
                 end
             end
             
-            
-            is_ppp_ingate = sum(ppp_ingate, 2) > 0;            
-            ppp_only_ingate =  is_ppp_ingate > z_to_bernoulli;            
-            is_ppp_or_bern_ingate = is_ppp_ingate | z_to_bernoulli;
-            
+            ppp_only_ingate = ...
+                (is_ppp_ingate | z_to_bernoulli) > z_to_bernoulli;            
             ppp_and_bern_ingate = ppp_ingate(z_to_bernoulli, :);
             is_ppp_and_bern_ingate = sum(ppp_and_bern_ingate, 2) > 0;
             
@@ -516,9 +516,8 @@ classdef PMBMfilter
                 hyp_trees{i} = cell(n_lhs * (mk + 1), 1);
                 
                 for (j = 1:n_lhs)
-                    lh = lhs(j);
                     tt_entry = [i, j];
-                    z_ingate_j = bern_ingate_cells{i}(:, j) > 0;
+                    z_ingate_j = bern_ingate_cells{i}(:, j);
                     
                     % misdetection
                     [bern_undetected, lik_undetected] = ... 
@@ -626,7 +625,7 @@ classdef PMBMfilter
                     local_h_i = obj.paras.MBM.ht(H_i, i);
                     if (local_h_i > 0)
                         lik_undetected =  tt_lik{i}(local_h_i,1);
-                        L_d(1:mk, i) = ... 
+                        L_d(:, i) = ... 
                             -(tt_lik{i}(local_h_i, 2:end) - lik_undetected);
                         sum_l0 = sum_l0 + lik_undetected;
                     end
@@ -664,7 +663,7 @@ classdef PMBMfilter
                 new_global_H_h = zeros(M_left, n_tt_up);
                 
                 for M_i=1:M_left
-                    new_global_H_h(M_i, :) = 0;
+                    new_global_H_h(M_i, 1:n_tt_up) = 0;
                     % we use the prior look-up-table, the prior
                     % hypothesis and the data association to figure out
                     % which posterior local hypothesis is included in
@@ -698,6 +697,11 @@ classdef PMBMfilter
 
                 n_H_up = n_H_up + M_left;
                 new_global_H = [new_global_H; new_global_H_h];
+            end
+            
+            if (n_H > 0)
+                %Normalize global hypothesis weights
+                new_w_log_h = normalizeLogWeights(new_w_log_h);
             end
             
             % The hypothesis created by measurements that were not
@@ -763,7 +767,7 @@ classdef PMBMfilter
             % re-index the global hypothesis table
             for i = 1:n_tt_up
                 idx = new_global_H(:,i) > 0;
-                [~,~,new_global_H(idx, i)] = ...
+                [~, ~, new_global_H(idx, i)] = ...
                     unique(new_global_H(idx, i), 'rows', 'stable');
             end
             
