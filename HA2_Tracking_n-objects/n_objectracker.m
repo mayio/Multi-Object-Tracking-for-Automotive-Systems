@@ -457,7 +457,7 @@ classdef n_objectracker
                 % number of measurements
                 mk = size(z, 2);
 
-                % there is a gating for for each state / hypothesis tree
+                % there is a gating for each state / hypothesis tree
                 % each cell contains a matrix
                 %    measurements x local hypothesis (each column is a
                 %    leaf)
