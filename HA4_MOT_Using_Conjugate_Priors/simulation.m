@@ -24,7 +24,7 @@ lambda_c = 10;
 P_S = 0.99;
 
 %Choose linear or nonlinear scenario
-scenario_type = 'nonlinear';
+scenario_type = 'linear';
 
 %Create tracking scenario
 switch(scenario_type)
@@ -122,29 +122,29 @@ tracker = multiobjectracker();
 tracker = tracker.initialize(density_class_handle,P_S,P_G,meas_model.d,w_min,merging_threshold,M,r_min,r_recycle,r_estimate);
 
 %GM-PHD filter
-GMPHDestimates = GMPHDfilter(tracker, birth_model, measdata, sensor_model, motion_model, meas_model);
+%GMPHDestimates = GMPHDfilter(tracker, birth_model, measdata, sensor_model, motion_model, meas_model);
 
 %PMBM filter
 PMBMestimates = PMBMfilter(tracker, birth_model, measdata, sensor_model, motion_model, meas_model);
 
 %Ploting
 true_state = cell2mat(objectdata.X');
-GMPHD_estimated_state = cell2mat(GMPHDestimates');
+%GMPHD_estimated_state = cell2mat(GMPHDestimates');
 PMBM_estimated_state = cell2mat(PMBMestimates');
 
 true_cardinality = objectdata.N;
-GMPHD_estimated_cardinality = cellfun(@(x) size(x,2), GMPHDestimates);
+%GMPHD_estimated_cardinality = cellfun(@(x) size(x,2), GMPHDestimates);
 PMBM_estimated_cardinality = cellfun(@(x) size(x,2), PMBMestimates);
 
 c = 100;
 p = 1;
-GMPHD_d_gospa = zeros(K,1);
+%GMPHD_d_gospa = zeros(K,1);
 PMBM_d_gospa = zeros(K,1);
 for k = 1:K
-    if isempty(GMPHDestimates{k}); GMPHDestimates{k} = zeros(motion_model.d,0); end
+    %if isempty(GMPHDestimates{k}); GMPHDestimates{k} = zeros(motion_model.d,0); end
     if isempty(PMBMestimates{k}); PMBMestimates{k} = zeros(motion_model.d,0); end
     %Evaluate kinematics estimation performance using GOSPA metric
-    [GMPHD_d_gospa(k), ~, GMPHD_decomposed_cost(k)] = GOSPA(objectdata.X{k}, GMPHDestimates{k}, p, c, 2);
+    %[GMPHD_d_gospa(k), ~, GMPHD_decomposed_cost(k)] = GOSPA(objectdata.X{k}, GMPHDestimates{k}, p, c, 2);
     [PMBM_d_gospa(k), ~, PMBM_decomposed_cost(k)] = GOSPA(objectdata.X{k}, PMBMestimates{k}, p, c, 2);
 end
 
@@ -154,6 +154,11 @@ hold on
 grid on
 
 h1 = plot(true_state(1,:), true_state(2,:), 'bo');
+
+%for k = 1:length(measdata)
+%    plot(measdata{k}(1,:), measdata{k}(2,:),'r+');
+%end
+
 h2 = plot(PMBM_estimated_state(1,:), PMBM_estimated_state(2,:),'r+');
 
 xlabel('x (m)'); ylabel('y (m)')
@@ -166,7 +171,7 @@ grid on
 hold on
 
 h1 = plot(1:length(true_cardinality),true_cardinality,'bo','linewidth',2);
-h2 = plot(1:length(GMPHD_estimated_cardinality),GMPHD_estimated_cardinality,'m+','linewidth',2);
+%h2 = plot(1:length(GMPHD_estimated_cardinality),GMPHD_estimated_cardinality,'m+','linewidth',2);
 h3 = plot(1:length(PMBM_estimated_cardinality),PMBM_estimated_cardinality,'r+','linewidth',2);
 
 xlabel('Time step')
@@ -179,16 +184,17 @@ figure
 subplot(4,1,1)
 grid on
 hold on
-plot(1:K,GMPHD_d_gospa,'linewidth',2)
+%plot(1:K,GMPHD_d_gospa,'linewidth',2)
 plot(1:K,PMBM_d_gospa,'linewidth',2)
-legend('PHD','PMBM','location','best')
+%legend('PHD','PMBM','location','best')
+legend('PMBM','location','best')
 ylabel('GOSPA')
 set(gca,'FontSize',12) 
 
 subplot(4,1,2)
 grid on
 hold on
-plot(1:K,[GMPHD_decomposed_cost.localisation],'linewidth',2)
+%plot(1:K,[GMPHD_decomposed_cost.localisation],'linewidth',2)
 plot(1:K,[PMBM_decomposed_cost.localisation],'linewidth',2)
 ylabel('Kinematics')
 set(gca,'FontSize',12) 
@@ -196,7 +202,7 @@ set(gca,'FontSize',12)
 subplot(4,1,3)
 grid on
 hold on
-plot(1:K,[GMPHD_decomposed_cost.missed],'linewidth',2)
+%plot(1:K,[GMPHD_decomposed_cost.missed],'linewidth',2)
 plot(1:K,[PMBM_decomposed_cost.missed],'linewidth',2)
 ylabel('Missed')
 set(gca,'FontSize',12) 
@@ -204,7 +210,7 @@ set(gca,'FontSize',12)
 subplot(4,1,4)
 grid on
 hold on
-plot(1:K,[GMPHD_decomposed_cost.false],'linewidth',2)
+%plot(1:K,[GMPHD_decomposed_cost.false],'linewidth',2)
 plot(1:K,[PMBM_decomposed_cost.false],'linewidth',2)
 xlabel('Time Step'); ylabel('False')
 set(gca,'FontSize',12) 

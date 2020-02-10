@@ -189,15 +189,16 @@ classdef PMBMfilter
 
             % Predict the undetected objects
             predict_undetected = @(i) ...
-                obj.density.predict(obj.paras.PPP.states(i), motionmodel);
+                obj.density.predict(...
+                    obj.paras.PPP.states(i,1), motionmodel);
 
             obj.paras.PPP.states = arrayfun(...
-                predict_undetected, 1:length(obj.paras.PPP.states));
+                predict_undetected, [1:length(obj.paras.PPP.states)]');
             obj.paras.PPP.w = obj.paras.PPP.w + log(P_S);
 
             % Add birth components
             obj.paras.PPP.states = ...
-                [obj.paras.PPP.states rmfield(birthmodel, 'w')]';
+                [obj.paras.PPP.states;rmfield(birthmodel, 'w')'];
             obj.paras.PPP.w = ...
                 [obj.paras.PPP.w; [birthmodel.w]'];
         end
@@ -225,18 +226,18 @@ classdef PMBMfilter
             clutter_intensity_log = log(clutter_intensity);
             P_D_log = log(P_D);
             
-            ppp_states_gated = obj.paras.PPP.states(indices);
+            ppp_states_gated = obj.paras.PPP.states(indices,1);
             ppp_states_updated = arrayfun(...
                 @(state) obj.density.update(state, z, measmodel), ...
                 ppp_states_gated);
-            w_log_gated = obj.paras.PPP.w(indices);
+            w_log_gated = obj.paras.PPP.w(indices,1);
             
             % compute predicted likelihood
             
             n_gated = length(ppp_states_gated);
             w_tilde_logs = zeros(n_gated, 1);
             for (i = 1:n_gated)
-                state = ppp_states_gated(i);
+                state = ppp_states_gated(i,1);
                 w_log = w_log_gated(i);
                 Hx = measmodel.H(state.x);
                 mu = measmodel.h(state.x);
@@ -405,6 +406,369 @@ classdef PMBMfilter
             %       logarithmic scale
             %       M: maximum global hypotheses kept
             
+            % 1. Perform ellipsoidal gating for each Bernoulli state 
+            %    density and each mixture component in the PPP intensity.
+            % 2. Bernoulli update. For each Bernoulli state density, create
+            %    a misdetection hypothesis (Bernoulli component), and 
+            %    m object detection hypothesis (Bernoulli component), 
+            %    where m is the number of detections inside the ellipsoidal
+            %    gate of the given state density.
+            % 3. Update PPP with detections. Note that for detections that
+            %    are not inside the gate of undetected objects, create 
+            %    dummy Bernoulli components with existence probability 
+            %    r = 0; in this case, the corresponding likelihood is 
+            %    simply the clutter intensity.
+            % 4. For each global hypothesis, construct the corresponding 
+            %    cost matrix and use Murty's algorithm to obtain the M best
+            %    global hypothesis with highest weights. Note that for 
+            %    detections that are only inside the gate of undetected 
+            %    objects, they do not need to be taken into account when
+            %    forming the cost matrix.
+            % 5. Update PPP intensity with misdetection.
+            % 6. Update the global hypothesis look-up table.
+            % 7. Prune global hypotheses with small weights and 
+            %    cap the number.
+            % 8. Prune local hypotheses (or hypothesis trees) that do not
+            %    appear in the maintained global hypotheses, and re-index
+            %    the global hypothesis look-up table.
+
+            % measurement count
+            mk = size(z, 2);
+            
+            % count of global hypothesis
+            n_tt = length(obj.paras.MBM.tt);
+            
+            % Perform ellipsoidal gating for each 
+            % mixture component in the PPP intensity.
+            [~, ppp_ingate_cells] = arrayfun(...
+                @(state) obj.density.ellipsoidalGating(...
+                    state, z, measmodel, gating.size),...
+                obj.paras.PPP.states, ...
+                'UniformOutput',false);
+            
+            ppp_ingate = cell2mat(ppp_ingate_cells');
+            bern_ingate_cells = {};
+
+            % Perform ellipsoidal gating for each Bernoulli state 
+            % density
+            
+            % for each hypothesis tree
+            z_to_bernoulli = false(mk,1);
+            for i = 1:n_tt
+                % local hypothesis
+                lhs = obj.paras.MBM.tt{i, 1};
+                n_lhs = length(lhs);
+                
+                % for each leaf (local hypothesis) do gating
+                bern_ingate_cells{i} = zeros(mk,n_lhs);
+
+                % each gating cell corresponds to a local hypothesis tree
+                % where each cell contains a matrix of mk rows and n_lhs
+                % columns
+                for i_lh = 1:n_lhs
+                    % gating
+                    [~, bern_ingate_cells{i}(:,i_lh)] = ... 
+                            obj.density.ellipsoidalGating(...
+                                lhs(i_lh).state, z, measmodel, gating.size);
+                    z_to_bernoulli = ... 
+                        z_to_bernoulli | bern_ingate_cells{i}(:,i_lh);
+                end
+            end
+            
+            
+            is_ppp_ingate = sum(ppp_ingate, 2) > 0;            
+            ppp_only_ingate =  is_ppp_ingate > z_to_bernoulli;            
+            is_ppp_or_bern_ingate = is_ppp_ingate | z_to_bernoulli;
+            
+            ppp_and_bern_ingate = ppp_ingate(z_to_bernoulli, :);
+            is_ppp_and_bern_ingate = sum(ppp_and_bern_ingate, 2) > 0;
+            
+            z_bern = z(:,z_to_bernoulli);
+            mk = size(z_bern, 2);
+            
+            bern_ingate_cells = cellfun(...
+                @(z_masks_i) z_masks_i(z_to_bernoulli,:), ...
+                bern_ingate_cells, 'UniformOutput' ,false);
+            
+            % Bernoulli update. For each Bernoulli state density,
+            % create a misdetection hypothesis (Bernoulli component),
+            % and m object detection hypothesis (Bernoulli component), 
+            % where m is the number of detections inside the
+            % ellipsoidal gate of the given state density.
+
+            % number of hypothesis trees (number of available trees plus
+            % number of trees spawned by measurements
+            % 
+            n_tt_up = n_tt + mk; 
+            hyp_trees = cell(n_tt_up, 1);
+            tt_lik = cell(n_tt, 1);
+            
+            % for each hypothesis tree
+            for i = 1:n_tt
+                % hypothesis tree i
+                lhs = obj.paras.MBM.tt{i, 1};
+                
+                % number of leafs / number of local hypotheses
+                n_lhs = length(lhs);
+                
+                % initialize log likelihoods with infinity
+                tt_lik{i} = -inf(n_lhs, mk + 1);
+                hyp_trees{i} = cell(n_lhs * (mk + 1), 1);
+                
+                for (j = 1:n_lhs)
+                    lh = lhs(j);
+                    tt_entry = [i, j];
+                    z_ingate_j = bern_ingate_cells{i}(:, j) > 0;
+                    
+                    % misdetection
+                    [bern_undetected, lik_undetected] = ... 
+                        obj.Bern_undetected_update(...
+                            tt_entry, sensormodel.P_D);
+                    
+                    hyp_trees{i}{(j - 1) * (mk + 1) + 1} = bern_undetected;
+                    tt_lik{i}(j, 1) = lik_undetected;
+                    
+                    %
+                    % detection of bernouli with measurement
+                    %
+
+                    % predicted likelihood --- (number of
+                    % measurements x 1) array in logarithmic scale
+                    lik_detected = obj.Bern_detected_update_lik(...
+                        tt_entry, z_bern(:, z_ingate_j), measmodel, sensormodel.P_D);
+                    
+                    tt_lik{i}(j, [false;z_ingate_j]) = lik_detected;
+                    
+                    for z_i = 1:mk
+                        if z_ingate_j(z_i, 1)
+                            hyp_trees{i}{(j - 1) * (mk + 1) + z_i + 1} = ...
+                                obj.Bern_detected_update_state(...
+                                    tt_entry, z_bern(:,z_i), measmodel);
+                        end
+                    end
+                end
+            end
+            
+
+            % Update PPP with detections. Note that for detections that
+            % are not inside the gate of undetected objects, create 
+            % dummy Bernoulli components with existence probability 
+            % r = 0; in this case, the corresponding likelihood is 
+            % simply the clutter intensity.  
+            %
+            % Each measurement creates a new hypothesis tree
+
+            Bern_undetected_lik = -inf(mk, 1);
+            
+            for (z_i = 1:mk)
+                z_i_ingate = ppp_and_bern_ingate(z_i, :);
+                
+                if (is_ppp_and_bern_ingate(z_i, 1))
+                    [Bern_PPP_detected_update, lik_new_PPP_detected_update] = ...
+                        obj.PPP_detected_update(...
+                            z_i_ingate, z_bern(:, z_i), measmodel, ...
+                            sensormodel.P_D, sensormodel.intensity_c);
+                    hyp_trees{n_tt + z_i, 1}{1} = Bern_PPP_detected_update;
+                    Bern_undetected_lik(z_i, 1) = ...
+                        lik_new_PPP_detected_update;
+                else
+                    % there are already dummy bernoullis, no need to 
+                    % create some
+                    Bern_undetected_lik(z_i) = ...
+                        log(sensormodel.intensity_c);
+                end
+            end
+           
+            % For each global hypothesis, construct the corresponding 
+            % cost matrix and use Murty's algorithm to obtain the M best
+            % global hypothesis with highest weights. Note that for 
+            % detections that are only inside the gate of undetected 
+            % objects, they do not need to be taken into account when
+            % forming the cost matrix.
+            
+            n_H = length(obj.paras.MBM.w);
+            new_global_H = zeros(0, n_tt_up);
+            new_w_log_h = [];
+            n_H_up = 0;
+            
+            L_u = inf(mk);
+            
+            % association between measurements and previously 
+            % undetected objects (clutter or new objects)
+            for i = 1:mk
+                L_u(i, i) = -Bern_undetected_lik(i, 1);
+            end
+            
+            if (n_H == 0)
+                new_w_log_h = 0;
+                n_H_up = 1;
+                new_global_H = zeros(1, mk);
+                new_global_H(1, is_ppp_and_bern_ingate) = 1;
+            end
+            
+            for H_i = 1:n_H
+                % Create 2D cost matrix; 
+                % 
+                % number of measurements rows, 
+                % number of bernoullis (association between measurements
+                % and previously detected objects) + number of
+                % measurements columns (associations between measurements
+                % and previously undetected objects - clutter or new
+                % objects)
+                %
+                
+                L_d = inf(mk, n_tt);
+                sum_l0 = 0;
+
+                % association between measurements and previously 
+                % detected objects
+                for i = 1:n_tt
+                    local_h_i = obj.paras.MBM.ht(H_i, i);
+                    if (local_h_i > 0)
+                        lik_undetected =  tt_lik{i}(local_h_i,1);
+                        L_d(1:mk, i) = ... 
+                            -(tt_lik{i}(local_h_i, 2:end) - lik_undetected);
+                        sum_l0 = sum_l0 + lik_undetected;
+                    end
+                end
+                
+                L = [L_d L_u];
+                
+                if isempty(L)
+                    % in case there are no associations
+                    gainBest = 0;
+                    col4rowBest = 0;
+                else
+                    % obtain M best assignments using a provided  
+                    % M-best 2D assignment solver; 
+
+                    % col4rowBest: A numRowXk vector where the entry in each 
+                    %    element is an assignment of the element in that row 
+                    %    to a column. 0 entries signify unassigned rows.
+                    %    The columns of this matrix are the hypotheses.
+                    [col4rowBest,~,gainBest] = kBest2DAssign(L, M);
+                    assert(all(gainBest ~= -1), ...
+                        'Assignment problem is not possible to solve');
+                end
+
+                % update weights
+                new_w_log_h = [new_w_log_h; ...
+                    -gainBest + sum_l0 + obj.paras.MBM.w(H_i)];
+
+                % there might be not as many hypotheses available
+                M_left = length(gainBest);
+                
+                % update global hypothesis look-up table according 
+                % to the M best assignment matrices obtained and 
+                % use your new local hypotheses indexing;
+                new_global_H_h = zeros(M_left, n_tt_up);
+                
+                for M_i=1:M_left
+                    new_global_H_h(M_i, :) = 0;
+                    % we use the prior look-up-table, the prior
+                    % hypothesis and the data association to figure out
+                    % which posterior local hypothesis is included in
+                    % the look-up-table
+                    for i = 1:n_tt
+                        if obj.paras.MBM.ht(H_i, i) > 0
+                            tree_node_idx = ...
+                                find(col4rowBest(:, M_i) == i, 1);
+                            
+                            if isempty(tree_node_idx)
+                                % missed detection hypothesis
+                                new_global_H_h(M_i, i) = ...
+                                    (obj.paras.MBM.ht(H_i, i) - 1) * (mk + 1) + 1;
+                            else
+                                % measurement update hypothesis
+                                new_global_H_h(M_i,i) = ...
+                                    (obj.paras.MBM.ht(H_i, i) - 1) * (mk + 1) + tree_node_idx + 1;
+                            end
+                        end
+                    end
+                    
+                    for i = n_tt + 1:n_tt_up
+                        idx = find(col4rowBest(:, M_i) == i, 1);
+                        
+                        if ~isempty(idx) && is_ppp_and_bern_ingate(idx)
+                            % measurement update for PPP
+                            new_global_H_h(M_i, i) = 1;
+                        end
+                    end
+                end
+
+                n_H_up = n_H_up + M_left;
+                new_global_H = [new_global_H; new_global_H_h];
+            end
+            
+            % The hypothesis created by measurements that were not
+            % associated to any detected object but to undetected objects
+            % must be added to the hypothesis tree
+            
+            z_to_ppp = z(:, ppp_only_ingate);
+            n_z_to_ppp = size(z_to_ppp, 2);
+            ppp_only_ingate_matrix = ppp_ingate(ppp_only_ingate, :);
+            
+            for i = 1:n_z_to_ppp
+                [hyp_trees{n_tt_up + i, 1}{1}, ~] = ...
+                    obj.PPP_detected_update(...
+                        ppp_only_ingate_matrix(i, :),...
+                        z_to_ppp(:, i),...
+                        measmodel,...
+                        sensormodel.P_D,...
+                        sensormodel.intensity_c);
+            end
+            new_global_H = [new_global_H ones(n_H_up, n_z_to_ppp)];
+            
+            obj = obj.PPP_undetected_update(sensormodel.P_D);
+
+            % Prune global hypotheses with small weights and 
+            % cap the number.
+            %
+            % Prune local hypotheses (or hypothesis trees) that do not
+            % appear in the maintained global hypotheses, and re-index
+            % the global hypothesis look-up table.
+            [new_w_log_h, hyp_left] = hypothesisReduction.prune(...
+                new_w_log_h, 1:n_H_up, w_min );
+            new_global_H = new_global_H(hyp_left, :);
+
+            % capping
+            [new_w_log_h, hyp_left] = hypothesisReduction.cap(...
+                new_w_log_h, 1:length(new_w_log_h), M);
+            new_global_H = new_global_H(hyp_left, :);
+
+            %normalize log weights
+            new_w_log_h = normalizeLogWeights(new_w_log_h);
+            
+            % prune all global hypothesis that don't 
+            % reference trees
+            if ~isempty(new_global_H)
+                idx = sum(new_global_H, 1) > 0;
+                new_global_H = new_global_H(:,idx);
+                hyp_trees = hyp_trees(idx);
+                n_tt_up = size(new_global_H, 2);
+            end            
+            
+            % clear old tree
+            obj.paras.MBM.tt = cell(n_tt_up, 1);
+
+            for i = 1:n_tt_up            
+                % prune local hypotheses that are not included in any
+                % of the global hypotheses;
+                hyp = new_global_H(:, i);
+                hyp_keep = unique(hyp(hyp ~= 0), 'stable');
+                pruned_hyp_tree = hyp_trees{i}(hyp_keep);
+                obj.paras.MBM.tt{i} = [pruned_hyp_tree{:}]';
+            end
+                
+            % re-index the global hypothesis table
+            for i = 1:n_tt_up
+                idx = new_global_H(:,i) > 0;
+                [~,~,new_global_H(idx, i)] = ...
+                    unique(new_global_H(idx, i), 'rows', 'stable');
+            end
+            
+            obj.paras.MBM.w = new_w_log_h;
+            obj.paras.MBM.ht = new_global_H;
         end
         
         function estimates = PMBM_estimator(obj,threshold)
@@ -412,7 +776,7 @@ classdef PMBMfilter
             %filter
             %INPUT: threshold (if exist): object states are extracted from
             %       Bernoulli components with probability of existence no
-            %       less than this threhold in Estimator 1. Given the
+            %       less than this threshold in Estimator 1. Given the
             %       probabilities of detection and survival, this threshold
             %       determines the number of consecutive misdetections
             %OUTPUT:estimates: estimated object states in matrix form of
@@ -421,8 +785,25 @@ classdef PMBMfilter
             %First, select the multi-Bernoulli with the highest weight.
             %Second, report the mean of the Bernoulli components whose
             %existence probability is above a threshold. 
+            estimates = [];
+            [~, best_mb_idx] = max(obj.paras.MBM.w);
+            best_h = obj.paras.MBM.ht(best_mb_idx,:);
+            n_B = length(best_h);
+            i_est = 0;
             
+            for i_B = 1:n_B
+                b_idx = best_h(i_B);
+                
+                if (b_idx > 0)
+                    % for each state the best bernoulli
+                    bern = obj.paras.MBM.tt{i_B}(b_idx);
+                    
+                    if bern.r > threshold
+                        i_est = i_est + 1;
+                        estimates(:, i_est) = bern.state.x;
+                    end
+                end
+            end
         end
-    
     end
 end
